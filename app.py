@@ -112,8 +112,8 @@ def render_mermaid(mermaid_code: str, height: int = 700):
 
     html_content = f"""
     <div id="mermaid-container"></div>
-    <button id="download-btn" style="margin-top: 10px; padding: 8px 16px; background-color: #0066cc; color: white; border: none; border-radius: 4px; cursor: pointer;">
-        ⬇️ Download as PNG
+    <button id="download-svg-btn" style="margin-top: 10px; padding: 8px 16px; background-color: #0066cc; color: white; border: none; border-radius: 4px; cursor: pointer; margin-right: 10px;">
+        ⬇️ Download as SVG
     </button>
 
     <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
@@ -134,36 +134,24 @@ def render_mermaid(mermaid_code: str, height: int = 700):
         }}) => {{
             container.innerHTML = svg;
             
-            // Add download functionality
-            document.getElementById("download-btn").addEventListener("click", function() {{
+            // Add SVG download functionality
+            document.getElementById("download-svg-btn").addEventListener("click", function() {{
                 const svgElement = container.querySelector("svg");
-                if (!svgElement) return;
+                if (!svgElement) {{
+                    alert("No diagram to download");
+                    return;
+                }}
                 
                 const svgData = new XMLSerializer().serializeToString(svgElement);
-                const canvas = document.createElement("canvas");
-                const ctx = canvas.getContext("2d");
-                const img = new Image();
-                
                 const svgBlob = new Blob([svgData], {{type: "image/svg+xml;charset=utf-8"}});
                 const url = URL.createObjectURL(svgBlob);
                 
-                img.onload = function() {{
-                    canvas.width = img.width;
-                    canvas.height = img.height;
-                    ctx.fillStyle = "white";
-                    ctx.fillRect(0, 0, canvas.width, canvas.height);
-                    ctx.drawImage(img, 0, 0);
-                    
-                    canvas.toBlob(function(blob) {{
-                        const link = document.createElement("a");
-                        link.download = "site-flow-diagram.png";
-                        link.href = URL.createObjectURL(blob);
-                        link.click();
-                        URL.revokeObjectURL(url);
-                    }});
-                }};
+                const link = document.createElement("a");
+                link.download = "site-flow-diagram.svg";
+                link.href = url;
+                link.click();
                 
-                img.src = url;
+                setTimeout(() => URL.revokeObjectURL(url), 100);
             }});
         }}).catch((err) => {{
             container.innerHTML = "<pre style='color:red;white-space:pre-wrap;'>" + err + "</pre>";
