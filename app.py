@@ -155,21 +155,45 @@ if run:
         )
 
     with right:
+        st.subheader("📊 Site Flow Diagram")
+        
         def render_mermaid(mermaid_code: str, height: int = 700):
-            # Escape to prevent HTML issues
-            safe_code = html.escape(mermaid_code)
+            # Put the mermaid code into JS safely (no HTML escaping that breaks parsing)
+            code_json = json.dumps(mermaid_code)
 
             html_content = f"""
-            <div class="mermaid">
-            {safe_code}
-            </div>
+            <div id="mermaid-container"></div>
 
-            <script type="module">
-            import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.esm.min.mjs';
-            mermaid.initialize({{ startOnLoad: true, theme: "default" }});
+            <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+            <script>
+            (function() {{
+                const code = {code_json};
+                mermaid.initialize({{
+                startOnLoad: false,
+                securityLevel: "loose"
+                }});
+
+                const container = document.getElementById("mermaid-container");
+                container.innerHTML = "";
+
+                try {{
+                mermaid.render("mermaid-svg", code).then(({{
+                    svg
+                }}) => {{
+                    container.innerHTML = svg;
+                }}).catch((err) => {{
+                    container.innerHTML = "<pre style='color:red;white-space:pre-wrap;'>" + err + "</pre>";
+                }});
+                }} catch (e) {{
+                container.innerHTML = "<pre style='color:red;white-space:pre-wrap;'>" + e + "</pre>";
+                }}
+            }})();
             </script>
             """
             components.html(html_content, height=height, scrolling=True)
+        
+        # Actually render the diagram!
+        render_mermaid(mmd)
 
     with st.expander("View raw Mermaid code"):
         st.code(mmd, language="markdown")
