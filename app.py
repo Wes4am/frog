@@ -107,6 +107,75 @@ def crawl(seed: str, max_pages: int, max_depth: int):
     mmd = build_mermaid(nodes, edges_list)
     return data, mmd
 
+def render_mermaid(mermaid_code: str, height: int = 700):
+    code_json = json.dumps(mermaid_code)
+
+    html_content = f"""
+    <div id="mermaid-container"></div>
+    <button id="download-btn" style="margin-top: 10px; padding: 8px 16px; background-color: #0066cc; color: white; border: none; border-radius: 4px; cursor: pointer;">
+        ⬇️ Download as PNG
+    </button>
+
+    <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+    <script>
+    (function() {{
+        const code = {code_json};
+        mermaid.initialize({{
+        startOnLoad: false,
+        securityLevel: "loose"
+        }});
+
+        const container = document.getElementById("mermaid-container");
+        container.innerHTML = "";
+
+        try {{
+        mermaid.render("mermaid-svg", code).then(({{
+            svg
+        }}) => {{
+            container.innerHTML = svg;
+            
+            // Add download functionality
+            document.getElementById("download-btn").addEventListener("click", function() {{
+                const svgElement = container.querySelector("svg");
+                if (!svgElement) return;
+                
+                const svgData = new XMLSerializer().serializeToString(svgElement);
+                const canvas = document.createElement("canvas");
+                const ctx = canvas.getContext("2d");
+                const img = new Image();
+                
+                const svgBlob = new Blob([svgData], {{type: "image/svg+xml;charset=utf-8"}});
+                const url = URL.createObjectURL(svgBlob);
+                
+                img.onload = function() {{
+                    canvas.width = img.width;
+                    canvas.height = img.height;
+                    ctx.fillStyle = "white";
+                    ctx.fillRect(0, 0, canvas.width, canvas.height);
+                    ctx.drawImage(img, 0, 0);
+                    
+                    canvas.toBlob(function(blob) {{
+                        const link = document.createElement("a");
+                        link.download = "site-flow-diagram.png";
+                        link.href = URL.createObjectURL(blob);
+                        link.click();
+                        URL.revokeObjectURL(url);
+                    }});
+                }};
+                
+                img.src = url;
+            }});
+        }}).catch((err) => {{
+            container.innerHTML = "<pre style='color:red;white-space:pre-wrap;'>" + err + "</pre>";
+        }});
+        }} catch (e) {{
+        container.innerHTML = "<pre style='color:red;white-space:pre-wrap;'>" + e + "</pre>";
+        }}
+    }})();
+    </script>
+    """
+    components.html(html_content, height=height, scrolling=True)
+
 st.set_page_config(page_title="Website Flow Crawler", layout="wide")
 
 st.title("🕷️ Website Flow Crawler (Simple Screaming Frog-lite)")
@@ -146,6 +215,9 @@ if run:
             use_container_width=True,
         )
 
+    with right:
+        st.subheader("📄 Mermaid Code")
+        
         st.download_button(
             "⬇️ Download graph.mmd",
             data=mmd,
@@ -153,47 +225,12 @@ if run:
             mime="text/plain",
             use_container_width=True,
         )
-
-    with right:
-        st.subheader("📊 Site Flow Diagram")
         
-        def render_mermaid(mermaid_code: str, height: int = 700):
-            # Put the mermaid code into JS safely (no HTML escaping that breaks parsing)
-            code_json = json.dumps(mermaid_code)
+        with st.expander("View Mermaid code"):
+            st.code(mmd, language="markdown")
 
-            html_content = f"""
-            <div id="mermaid-container"></div>
-
-            <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
-            <script>
-            (function() {{
-                const code = {code_json};
-                mermaid.initialize({{
-                startOnLoad: false,
-                securityLevel: "loose"
-                }});
-
-                const container = document.getElementById("mermaid-container");
-                container.innerHTML = "";
-
-                try {{
-                mermaid.render("mermaid-svg", code).then(({{
-                    svg
-                }}) => {{
-                    container.innerHTML = svg;
-                }}).catch((err) => {{
-                    container.innerHTML = "<pre style='color:red;white-space:pre-wrap;'>" + err + "</pre>";
-                }});
-                }} catch (e) {{
-                container.innerHTML = "<pre style='color:red;white-space:pre-wrap;'>" + e + "</pre>";
-                }}
-            }})();
-            </script>
-            """
-            components.html(html_content, height=height, scrolling=True)
-        
-        # Actually render the diagram!
-        render_mermaid(mmd)
-
-    with st.expander("View raw Mermaid code"):
-        st.code(mmd, language="markdown")
+    # Separate section for the rendered diagram
+    st.divider()
+    st.subheader("📊 Site Flow Diagram")
+    
+    render_mermaid(mmd)
