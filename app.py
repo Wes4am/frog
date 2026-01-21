@@ -3,10 +3,12 @@ import re
 from collections import deque
 from urllib.parse import urljoin, urlparse, urldefrag
 import streamlit.components.v1 as components
-import html
 import requests
 import streamlit as st
 from bs4 import BeautifulSoup
+from pyvis.network import Network
+import tempfile
+import os
 
 UA = "SimpleFlowCrawler/0.1"
 
@@ -59,15 +61,408 @@ def extract_links(page_url: str, html: str) -> set[str]:
             out.add(u)
     return out
 
-def build_mermaid(nodes: list[str], edges: list[tuple[str, str]]) -> str:
-    id_map = {u: f"N{i}" for i, u in enumerate(nodes, start=1)}
-    lines = ["flowchart TD"]
-    for u in nodes:
-        lines.append(f'  {id_map[u]}["{u.replace(chr(34), r"\"")}"]')
-    for a, b in edges:
-        if a in id_map and b in id_map:
-            lines.append(f"  {id_map[a]} --> {id_map[b]}")
-    return "\n".join(lines) + "\n"
+def get_url_label(url: str, max_length: int = 40) -> str:
+    """Create a readable label from URL"""
+    parsed = urlparse(url)
+    path = parsed.path.rstrip('/') or '/'
+    
+    # If it's just the homepage
+    if path == '/':
+        return parsed.netloc
+    
+    # Show the last part of the path
+    parts = [p for p in path.split('/') if p]
+    if parts:
+        label = '/' + '/'.join(parts[-2:]) if len(parts) > 1 else '/' + parts[-1]
+    else:
+        label = path
+    
+    # Truncate if too long
+    if len(label) > max_length:
+        label = '...' + label[-(max_length-3):]
+    
+    return label
+
+def build_network_graph(nodes: list[str], edges: list[tuple[str, str]], status_by_url: dict, seed_url: str, layout: str = "force", show_labels: str = "all"):
+    """Build an interactive network graph using pyvis"""
+    net = Network(
+        height="900px",
+        width="100%",
+        bgcolor="#ffffff",
+        font_color="#000000",
+        directed=True
+    )
+    
+    # Calculate node metrics first (for filtering)
+    node_set = set(nodes)
+    outgoing = {n: 0 for n in nodes}
+    incoming = {n: 0 for n in nodes}
+    
+    for source, target in edges:
+        if source in node_set:
+            outgoing[source] = outgoing.get(source, 0) + 1
+        if target in node_set:
+            incoming[target] = incoming.get(target, 0) + 1
+    
+    # Different layout configurations
+    if layout == "tree":
+        # Hierarchical tree layout - no circle formation!
+        net.set_options("""
+        {
+            "layout": {
+                "hierarchical": {
+                    "enabled": true,
+                    "levelSeparation": 200,
+                    "nodeSpacing": 150,
+                    "treeSpacing": 200,
+                    "blockShifting": true,
+                    "edgeMinimization": true,
+                    "parentCentralization": true,
+                    "direction": "UD",
+                    "sortMethod": "directed"
+                }
+            },
+            "physics": {
+                "enabled": false
+            },
+            "nodes": {
+                "font": {
+                    "size": 16,
+                    "face": "Arial",
+                    "strokeWidth": 4,
+                    "strokeColor": "#ffffff"
+                },
+                "borderWidth": 3,
+                "shape": "dot"
+            },
+            "edges": {
+                "smooth": {
+                    "type": "cubicBezier",
+                    "forceDirection": "vertical",
+                    "roundness": 0.4
+                },
+                "arrows": {
+                    "to": {
+                        "enabled": true,
+                        "scaleFactor": 0.4
+                    }
+                },
+                "color": {
+                    "color": "#c0c0c0",
+                    "opacity": 0.3
+                },
+                "width": 1.5
+            },
+            "interaction": {
+                "hover": true,
+                "tooltipDelay": 100,
+                "navigationButtons": true,
+                "keyboard": true,
+                "zoomView": true,
+                "dragView": true
+            }
+        }
+        """)
+    elif layout == "spread":
+        # Super spread out layout - maximum readability
+        net.set_options("""
+        {
+            "physics": {
+                "enabled": true,
+                "stabilization": {
+                    "enabled": true,
+                    "iterations": 3000,
+                    "updateInterval": 25
+                },
+                "barnesHut": {
+                    "gravitationalConstant": -80000,
+                    "centralGravity": 0.01,
+                    "springLength": 400,
+                    "springConstant": 0.001,
+                    "damping": 0.7,
+                    "avoidOverlap": 1
+                }
+            },
+            "nodes": {
+                "font": {
+                    "size": 18,
+                    "face": "Arial",
+                    "strokeWidth": 5,
+                    "strokeColor": "#ffffff"
+                },
+                "borderWidth": 3,
+                "shape": "dot"
+            },
+            "edges": {
+                "smooth": {
+                    "type": "continuous"
+                },
+                "arrows": {
+                    "to": {
+                        "enabled": true,
+                        "scaleFactor": 0.3
+                    }
+                },
+                "color": {
+                    "color": "#e8e8e8",
+                    "opacity": 0.15
+                },
+                "width": 0.3
+            },
+            "interaction": {
+                "hover": true,
+                "tooltipDelay": 100,
+                "navigationButtons": true,
+                "keyboard": true,
+                "hideEdgesOnDrag": true,
+                "hideEdgesOnZoom": true
+            }
+        }
+        """)
+    elif layout == "radial":
+        # Radial/circular layout - seed in center, pages spread around
+        net.set_options("""
+        {
+            "physics": {
+                "enabled": true,
+                "stabilization": {
+                    "enabled": true,
+                    "iterations": 1500,
+                    "updateInterval": 50
+                },
+                "barnesHut": {
+                    "gravitationalConstant": -20000,
+                    "centralGravity": 0.15,
+                    "springLength": 250,
+                    "springConstant": 0.02,
+                    "damping": 0.6,
+                    "avoidOverlap": 0.4
+                }
+            },
+            "nodes": {
+                "font": {
+                    "size": 16,
+                    "face": "Arial",
+                    "strokeWidth": 3,
+                    "strokeColor": "#ffffff"
+                },
+                "borderWidth": 3,
+                "shape": "dot"
+            },
+            "edges": {
+                "smooth": {
+                    "type": "continuous",
+                    "roundness": 0.5
+                },
+                "arrows": {
+                    "to": {
+                        "enabled": true,
+                        "scaleFactor": 0.3
+                    }
+                },
+                "color": {
+                    "color": "#e0e0e0",
+                    "opacity": 0.2
+                },
+                "width": 0.5
+            },
+            "interaction": {
+                "hover": true,
+                "tooltipDelay": 100,
+                "navigationButtons": true,
+                "keyboard": true,
+                "zoomView": true,
+                "dragView": true
+            }
+        }
+        """)
+    elif layout == "clustered":
+        # Clustered force layout - groups related pages
+        net.set_options("""
+        {
+            "physics": {
+                "enabled": true,
+                "stabilization": {
+                    "enabled": true,
+                    "iterations": 2500
+                },
+                "forceAtlas2Based": {
+                    "gravitationalConstant": -100,
+                    "centralGravity": 0.005,
+                    "springLength": 200,
+                    "springConstant": 0.05,
+                    "damping": 0.5,
+                    "avoidOverlap": 0.8
+                },
+                "solver": "forceAtlas2Based"
+            },
+            "nodes": {
+                "font": {
+                    "size": 16,
+                    "face": "Arial",
+                    "strokeWidth": 4,
+                    "strokeColor": "#ffffff"
+                },
+                "borderWidth": 3,
+                "shape": "dot"
+            },
+            "edges": {
+                "smooth": {
+                    "type": "continuous"
+                },
+                "arrows": {
+                    "to": {
+                        "enabled": true,
+                        "scaleFactor": 0.3
+                    }
+                },
+                "color": {
+                    "color": "#e0e0e0",
+                    "opacity": 0.15
+                },
+                "width": 0.5
+            },
+            "interaction": {
+                "hover": true,
+                "tooltipDelay": 100,
+                "navigationButtons": true,
+                "hideEdgesOnDrag": true,
+                "hideEdgesOnZoom": true
+            }
+        }
+        """)
+    else:  # "force" - balanced force-directed
+        net.set_options("""
+        {
+            "physics": {
+                "enabled": true,
+                "stabilization": {
+                    "enabled": true,
+                    "iterations": 2000,
+                    "updateInterval": 25
+                },
+                "barnesHut": {
+                    "gravitationalConstant": -25000,
+                    "centralGravity": 0.05,
+                    "springLength": 250,
+                    "springConstant": 0.02,
+                    "damping": 0.5,
+                    "avoidOverlap": 0.5
+                }
+            },
+            "nodes": {
+                "font": {
+                    "size": 16,
+                    "face": "Arial",
+                    "strokeWidth": 4,
+                    "strokeColor": "#ffffff"
+                },
+                "borderWidth": 3,
+                "shape": "dot"
+            },
+            "edges": {
+                "smooth": {
+                    "type": "continuous"
+                },
+                "arrows": {
+                    "to": {
+                        "enabled": true,
+                        "scaleFactor": 0.3
+                    }
+                },
+                "color": {
+                    "color": "#d0d0d0",
+                    "opacity": 0.2
+                },
+                "width": 0.5
+            },
+            "interaction": {
+                "hover": true,
+                "tooltipDelay": 100,
+                "navigationButtons": true,
+                "keyboard": true
+            }
+        }
+        """)
+    
+    # Calculate depth from seed (for coloring and hierarchy)
+    node_depths = {}
+    from collections import deque
+    q = deque([(seed_url, 0)])
+    visited_depth = {seed_url: 0}
+    
+    while q:
+        url, depth = q.popleft()
+        node_depths[url] = depth
+        for source, target in edges:
+            if source == url and target in node_set and target not in visited_depth:
+                visited_depth[target] = depth + 1
+                q.append((target, depth + 1))
+    
+    # Add nodes with sizing based on importance (links)
+    for url in nodes:
+        status = status_by_url.get(url)
+        depth = node_depths.get(url, 0)
+        
+        # Calculate importance: total connections
+        importance = incoming.get(url, 0) + outgoing.get(url, 0)
+        
+        # Decide if we should show label
+        is_seed = url == seed_url
+        is_important = importance >= 3  # Has 3+ connections
+        
+        if show_labels == "important":
+            show_this_label = is_seed or is_important
+        elif show_labels == "seed":
+            show_this_label = is_seed
+        else:  # "all"
+            show_this_label = True
+        
+        # Create label
+        if show_this_label:
+            label = get_url_label(url, max_length=30)
+        else:
+            label = ""  # No label, just dot
+        
+        # Color based on HTTP status
+        if status == 200:
+            color = "#4CAF50"  # Green for success
+        elif status and 300 <= status < 400:
+            color = "#FF9800"  # Orange for redirects
+        elif status and 400 <= status < 500:
+            color = "#F44336"  # Red for client errors
+        elif status and 500 <= status < 600:
+            color = "#9C27B0"  # Purple for server errors
+        else:
+            color = "#9E9E9E"  # Gray for unknown
+        
+        # Size based on importance - seed is largest, then by connection count
+        if is_seed:
+            size = 50
+        else:
+            size = min(40, 20 + importance * 3)
+        
+        title = f"📄 {url}\n━━━━━━━━━━━━━━━━━━\n✓ Status: {status if status else 'N/A'}\n📊 Depth: {depth}\n🔗 Links In: {incoming.get(url, 0)}\n🔗 Links Out: {outgoing.get(url, 0)}"
+        
+        # For hierarchical layout, set level
+        node_options = {
+            "label": label,
+            "title": title,
+            "color": color,
+            "size": size
+        }
+        
+        if layout == "tree":
+            node_options["level"] = depth
+        
+        net.add_node(url, **node_options)
+    
+    # Add edges
+    for source, target in edges:
+        if source in node_set and target in node_set:
+            net.add_edge(source, target)
+    
+    return net
 
 def crawl(seed: str, max_pages: int, max_depth: int):
     seed = normalize_url(seed, "") or seed
@@ -78,11 +473,19 @@ def crawl(seed: str, max_pages: int, max_depth: int):
     edges = set()
     status_by_url = {}
 
+    progress_bar = st.progress(0)
+    status_text = st.empty()
+
     while q and len(visited) < max_pages:
         url, depth = q.popleft()
         if url in visited:
             continue
         visited.add(url)
+        
+        # Update progress
+        progress = len(visited) / max_pages
+        progress_bar.progress(min(progress, 1.0))
+        status_text.text(f"Crawling: {len(visited)} pages found...")
 
         status, html = fetch_html(url)
         status_by_url[url] = status
@@ -97,6 +500,9 @@ def crawl(seed: str, max_pages: int, max_depth: int):
             if link not in visited:
                 q.append((link, depth + 1))
 
+    progress_bar.empty()
+    status_text.empty()
+
     nodes = sorted(visited)
     edges_list = sorted(edges)
     data = {
@@ -104,97 +510,67 @@ def crawl(seed: str, max_pages: int, max_depth: int):
         "nodes": [{"url": u, "status": status_by_url.get(u)} for u in nodes],
         "edges": [{"from": a, "to": b} for a, b in edges_list],
     }
-    mmd = build_mermaid(nodes, edges_list)
-    return data, mmd
+    
+    return data, nodes, edges_list, status_by_url
 
-def render_mermaid(mermaid_code: str, height: int = 700):
-    code_json = json.dumps(mermaid_code)
+def render_network(net: Network):
+    """Render the pyvis network in Streamlit"""
+    # Save to temporary file
+    with tempfile.NamedTemporaryFile(delete=False, suffix='.html', mode='w', encoding='utf-8') as f:
+        net.save_graph(f.name)
+        with open(f.name, 'r', encoding='utf-8') as file:
+            html_content = file.read()
+        os.unlink(f.name)
+    
+    # Display in Streamlit
+    components.html(html_content, height=750, scrolling=False)
 
-    html_content = f"""
-    <div id="mermaid-container"></div>
-    <button id="download-svg-btn" style="margin-top: 10px; padding: 8px 16px; background-color: #0066cc; color: white; border: none; border-radius: 4px; cursor: pointer; margin-right: 10px;">
-        ⬇️ Download as SVG
-    </button>
-
-    <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
-    <script>
-    (function() {{
-        const code = {code_json};
-        mermaid.initialize({{
-        startOnLoad: false,
-        securityLevel: "loose"
-        }});
-
-        const container = document.getElementById("mermaid-container");
-        container.innerHTML = "";
-
-        try {{
-        mermaid.render("mermaid-svg", code).then(({{
-            svg
-        }}) => {{
-            container.innerHTML = svg;
-            
-            // Add SVG download functionality
-            document.getElementById("download-svg-btn").addEventListener("click", function() {{
-                const svgElement = container.querySelector("svg");
-                if (!svgElement) {{
-                    alert("No diagram to download");
-                    return;
-                }}
-                
-                const svgData = new XMLSerializer().serializeToString(svgElement);
-                const svgBlob = new Blob([svgData], {{type: "image/svg+xml;charset=utf-8"}});
-                const url = URL.createObjectURL(svgBlob);
-                
-                const link = document.createElement("a");
-                link.download = "site-flow-diagram.svg";
-                link.href = url;
-                link.click();
-                
-                setTimeout(() => URL.revokeObjectURL(url), 100);
-            }});
-        }}).catch((err) => {{
-            container.innerHTML = "<pre style='color:red;white-space:pre-wrap;'>" + err + "</pre>";
-        }});
-        }} catch (e) {{
-        container.innerHTML = "<pre style='color:red;white-space:pre-wrap;'>" + e + "</pre>";
-        }}
-    }})();
-    </script>
-    """
-    components.html(html_content, height=height, scrolling=True)
-
+# Streamlit UI
 st.set_page_config(page_title="Website Flow Crawler", layout="wide")
 
-st.title("🕷️ Website Flow Crawler (Simple Screaming Frog-lite)")
-st.caption("Enter a website → Crawl internal pages → Visual flowchart (Mermaid).")
+st.title("🕷️ Website Flow Crawler")
+st.caption("Enter a website → Crawl internal pages → Interactive network visualization")
 
-col1, col2, col3 = st.columns([2, 1, 1])
+col1, col2, col3, col4, col5 = st.columns([2, 1, 1, 1, 1])
 with col1:
     seed = st.text_input("Seed URL", value="https://example.com")
 with col2:
     max_pages = st.number_input("Max pages", min_value=1, max_value=5000, value=200, step=50)
 with col3:
     max_depth = st.number_input("Max depth", min_value=0, max_value=20, value=3, step=1)
+with col4:
+    layout_type = st.selectbox("Layout", ["tree", "spread", "force", "radial", "clustered"], index=0)
+with col5:
+    label_mode = st.selectbox("Labels", ["important", "all", "seed"], index=0)
 
-run = st.button("🚀 Crawl & Build Flowchart", use_container_width=True)
+run = st.button("🚀 Crawl & Build Network Graph", use_container_width=True)
 
 if run:
     if not seed.startswith(("http://", "https://")):
         st.error("Please include http:// or https:// in the URL.")
         st.stop()
 
-    with st.spinner("Crawling..."):
-        data, mmd = crawl(seed, int(max_pages), int(max_depth))
+    with st.spinner("Crawling website..."):
+        data, nodes, edges_list, status_by_url = crawl(seed, int(max_pages), int(max_depth))
 
-    left, right = st.columns([1, 1])
+    # Summary section
+    st.divider()
+    col1, col2, col3, col4 = st.columns(4)
+    
+    with col1:
+        st.metric("📄 Pages Found", len(data['nodes']))
+    with col2:
+        st.metric("🔗 Links Found", len(data['edges']))
+    with col3:
+        success_pages = sum(1 for n in data['nodes'] if n.get('status') == 200)
+        st.metric("✅ Successful (200)", success_pages)
+    with col4:
+        error_pages = sum(1 for n in data['nodes'] if n.get('status', 0) >= 400)
+        st.metric("❌ Errors (4xx/5xx)", error_pages)
 
-    with left:
-        st.subheader("📌 Summary")
-        st.write(f"**Seed:** {data['seed']}")
-        st.write(f"**Pages found:** {len(data['nodes'])}")
-        st.write(f"**Links found:** {len(data['edges'])}")
-
+    # Download section
+    col1, col2 = st.columns(2)
+    with col1:
         st.download_button(
             "⬇️ Download crawl.json",
             data=json.dumps(data, indent=2, ensure_ascii=False),
@@ -202,23 +578,53 @@ if run:
             mime="application/json",
             use_container_width=True,
         )
-
-    with right:
-        st.subheader("📄 Mermaid Code")
+    with col2:
+        # Create CSV export
+        csv_data = "URL,Status,Type\n"
+        for node in data['nodes']:
+            csv_data += f"\"{node['url']}\",{node.get('status', 'N/A')},page\n"
         
         st.download_button(
-            "⬇️ Download graph.mmd",
-            data=mmd,
-            file_name="graph.mmd",
-            mime="text/plain",
+            "⬇️ Download crawl.csv",
+            data=csv_data,
+            file_name="crawl.csv",
+            mime="text/csv",
             use_container_width=True,
         )
-        
-        with st.expander("View Mermaid code"):
-            st.code(mmd, language="markdown")
 
-    # Separate section for the rendered diagram
+    # Network visualization
     st.divider()
-    st.subheader("📊 Site Flow Diagram")
+    st.subheader("📊 Interactive Site Flow Network")
     
-    render_mermaid(mmd)
+    # Add legend
+    st.markdown("""
+    **Legend:** 
+    🟢 Green = Success (200) | 
+    🟠 Orange = Redirect (3xx) | 
+    🔴 Red = Client Error (4xx) | 
+    🟣 Purple = Server Error (5xx) | 
+    ⚪ Gray = Unknown
+    
+    **Node Size** = Number of connections (bigger = more important)
+    """)
+    
+    if layout_type == "tree":
+        st.success("🌳 **Tree Layout:** Clean top-to-bottom hierarchy. NO CIRCLES! Seed at top, pages flow down by depth. Most readable for large sites.")
+    elif layout_type == "spread":
+        st.success("📐 **Super Spread:** Maximum spacing between nodes. Ultra-readable for complex sites. Best with 'important' labels.")
+    elif layout_type == "force":
+        st.info("💡 **Force-Directed:** Balanced map view. Pages naturally spread apart. Shows site structure clearly.")
+    elif layout_type == "radial":
+        st.info("💡 **Radial Layout:** Seed URL in center, pages radiate outward. Great for seeing site depth.")
+    else:
+        st.info("💡 **Clustered Layout:** Pages group by similarity. Best for complex sites.")
+    
+    with st.spinner("Building network graph..."):
+        net = build_network_graph(nodes, edges_list, status_by_url, seed, layout_type, label_mode)
+        render_network(net)
+
+    # Show page list in expander
+    with st.expander("📋 View All Pages"):
+        for node in data['nodes']:
+            status_emoji = "✅" if node.get('status') == 200 else "❌" if node.get('status', 0) >= 400 else "⚠️"
+            st.text(f"{status_emoji} [{node.get('status', 'N/A')}] {node['url']}")
